@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>The Controller Filter Chain in Ruby on Rails</title>
+</head>
+<body>
+  <hgroup>
+    <h1>Brain Discount</h1>
+    <h2>by Manfred Stienstra</a></h2>
+  </hgroup>
+  
+  <section>
+    <h1>The Controller Filter Chain in Ruby on Rails</h1>
+    
+    <blockquote>
+      <p>“Think it over, think it under.”</p>
+      <cite>― A.A. Milne, Winnie-the-Pooh</cite>
+    </blockquote>
+    
+    <p>
+      I'm not sure what that quote means but I want you to write code for bears like 
+      Winnie-the-Pooh. If you don't know a lot about bears, you can also imagine yourself in
+      two years after a 13-hours intercontinental flight. Someone taps you on the shoulder and
+      you need to explain your code. You have 15 seconds.
+    </p>
+    
+    <h2>Making Winnie-the-Pooh cry</h2>
+    
+    <p>
+      In Ruby on Rails there are two often used <em>callback chains</em>. Controller filters and
+      Active Record callbacks. Let's look at something ridiculous first.
+    </p>
+    
+    <div class="sidenote">
+      <p>
+        For this example we assume our authors have names that split up in first and last name.
+        In general you can't do this. If you don't believe me, read <a href="http://www.kalzumeus.com/2010/06/17/falsehoods-programmers-believe-about-names/">Falsehoods Programmers Believe About Names</a>. It takes about 5 minutes, and is totally worth it.
+      </p>
+    </div>
+    
+    <pre><code>class Author < ActiveRecord::Base
+  after_initialize :set_full_name!
+  attr_reader :full_name
+
+private
+
+  def set_full_name!
+    @full_name = [first_name, last_name].join(' ')
+  end
+end</code></pre>
+    
+    <p>
+      Hahaha, that's really weird! That's not how you define an accessor. I know, right?
+    </p>
+    
+    <pre><code>class AuthorsController < ApplicationController
+  before_action :set_full_name!
+
+private
+
+  def set_full_name!
+    @author = Author.find(params[:id])
+    @author_full_name = [@author.first_name, @author.last_name].join(' ')
+  end
+end</code></pre>
+    
+    <p>
+      Pooh is weeping almost inaudibly. Almost… But we know how to cheer him up! We can just
+      refactor this thing into an accessor.
+    </p>
+    
+<pre><code>class Author < ActiveRecord::Base
+  def full_name
+    [first_name, last_name].compact.join(' ')
+  end
+end</code></pre>
+    
+    <p>
+      Once we realize that controllers and models are all just Ruby classes we can do the same
+      thing in the controller. Action Pack even gives us the little gem
+      <code><span class="function">helper_method</span></code> which allows us to turn the
+      accessor to a helper that is usable in the view.
+    </p>
+    
+<pre><code>class AuthorsController < ApplicationController
+  before_action :find_author, only: %i(show)
+
+private
+
+  def author_full_name
+    [@author.first_name, @author.last_name].compact.join(' ')
+  end
+  helper_method :author_full_name
+end</code></pre>
+    
+    <p>
+      Pooh is happy again! And not just because he just ate a gallon of honey. Wait, why didn't
+      we get rid of all the before filters?
+    </p>
+    
+    <h2>A History Lesson</h2>
+    
+    <p>
+      What is a web server, but a Series of Tubes? That's exactly what they thought at
+      <a href="http://httpd.apache.org/docs/2.2/filter.html">Apache</a>.
+    </p>
+    
+    <p>
+      When responding to an HTTP request you basically apply some input filters, then do some 
+      content generation, and finally some output filtering. Input filters do things like character
+      set conversions, internal redirects, parameter mangling. Output filters can deflate (zip).
+      And SSL is nothing but an around filter.
+    </p>
+    
+    <div class="sidenote">
+      <p>
+        The filter methods used to be called <code><span class="function">*_filter</span></code>,
+        but the _filter parts has become _action.
+      </p>
+    </div>
+    
+    <p>
+      Sounds familiar? Rails does the same with its
+      <code><span class="function">*_action</span></code> methods. The principle is really clear
+      and simple, and like anything it can be horribly misused.
+    </p>
+    
+    <p>
+      An we misused it to death. When we couldn't misuse it even more we moved all of this
+      misuse to Rack modules. But that's a story for another day.
+    </p>
+    
+    <h2>Doing the Thing Right</h2>
+    
+    <p>
+      Here I do the smart writing thing and refer back to the quote from the first paragraph.
+      Think before you do something. Or what was the quote again? I forgot.
+    </p>
+    
+    <p>
+      So what are we allowed to do from the controller callback chains? We're not a web server like
+      Apache and our chain is basically just a list of methods to invoke. Let's just lay down
+      some rules.
+    </p>
+    
+    <h3>1. Set instance variables to make the controller more readable</h3>
+    
+    <p>
+      The method should be called for ‘a lot of the actions’ and it should be something that
+      clearly needs to be done before we can process the action. This means things like finding
+      the resource being operated on in this controller: the
+      <code><span class="class">Author</span></code> in an
+      <code><span class="class">AuthorsController</span></code>. Another example is finding the
+      authenticated user because it needs to be there for every action anyway.
+    </p>
+    
+    <h3>2. Influence the render chain</h3>
+    
+    <p>
+      Render a response from a filter to halt the rest of the render chain. In most cases you
+      do this to implement authorization. When the authenticated user couldn't be found we send
+      a <code>401</code> page. Maybe we can send <code>304 Not Modified</code> to save a lot of
+      work being done in the action.
+    </p>
+    
+    <h3>3. Keep branching in actions to a minimum</h3>
+    
+    <p>
+      Imagine a controller where every action needs an author on a book resource. In one
+      <code><span class="function">before_action’</span></code> we find the book. In another we
+      make sure the book has an author, otherwise we redirect to the edit page.
+    </p>
+    
+    <pre><code>class AuthorsController < ApplicationController
+  before_action :find_book, :ensure_author
+
+private
+
+  # Finds the book or raises an ActiveRecord::RecordNotFound,
+  # which renders a nice 404 Not Found.
+  def find_book
+    @book = Book.find(params[:id])
+  end
+
+  # Make sure there is an author and otherwise redirect to a
+  # page where the author can be filled out
+  def ensure_author
+    unless @book.author
+      redirect_to new_book_author_url(@book)
+    end
+  end
+end</code></pre>
+    
+    <p>Finally, remember that rules may be broken, but only if you're willing to do jail time.</p>
+  </section>
+  
+  <section>
+    <a href="/">Back</a>
+  </section>
+</body>
+</html>
